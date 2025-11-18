@@ -121,16 +121,6 @@
                         android:inputType="numberDecimal"/>
                 </com.google.android.material.textfield.TextInputLayout>
 
-                <Button
-                    android:id="@+id/btnSubmitTmaWaduk"
-                    android:text="Simpan TMA Waduk"
-                    android:layout_width="match_parent"
-                    android:layout_height="48dp"
-                    android:layout_marginTop="12dp"
-                    android:backgroundTint="#0054A6"
-                    android:textColor="#FFFFFF"
-                    android:textAllCaps="false"
-                    style="@style/Widget.MaterialComponents.Button"/>
             </LinearLayout>
         </androidx.cardview.widget.CardView>
 
@@ -234,16 +224,6 @@
                         android:inputType="numberDecimal"/>
                 </com.google.android.material.textfield.TextInputLayout>
 
-                <Button
-                    android:id="@+id/btnSubmitThomson"
-                    android:text="Simpan Thomson - Gallery"
-                    android:layout_width="match_parent"
-                    android:layout_height="48dp"
-                    android:layout_marginTop="12dp"
-                    android:backgroundTint="#0054A6"
-                    android:textColor="#FFFFFF"
-                    android:textAllCaps="false"
-                    style="@style/Widget.MaterialComponents.Button"/>
             </LinearLayout>
         </androidx.cardview.widget.CardView>
 
@@ -401,20 +381,10 @@
                     </com.google.android.material.textfield.TextInputLayout>
                 </LinearLayout>
 
-                <Button
-                    android:id="@+id/btnSubmitBocoran"
-                    android:layout_width="match_parent"
-                    android:layout_height="48dp"
-                    android:layout_marginTop="12dp"
-                    android:text="Simpan Bocoran Baru"
-                    android:backgroundTint="#0054A6"
-                    android:textColor="#FFFFFF"
-                    android:textAllCaps="false"
-                    style="@style/Widget.MaterialComponents.Button"/>
             </LinearLayout>
         </androidx.cardview.widget.CardView>
 
-        <!-- SECTION: Hitung Semua Data -->
+        <!-- SECTION: Simpan & Hitung Semua Data -->
         <androidx.cardview.widget.CardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -431,13 +401,13 @@
                 android:gravity="center">
 
                 <Button
-                    android:id="@+id/btnHitungSemua"
+                    android:id="@+id/btnSimpanDanHitung"
                     android:layout_width="match_parent"
                     android:layout_height="60dp"
-                    android:text="HITUNG SEMUA DATA"
+                    android:text="SIMPAN DAN HITUNG SEMUA DATA"
                     android:textSize="18sp"
                     android:textStyle="bold"
-                    android:backgroundTint="#FF9800"
+                    android:backgroundTint="#4CAF50"
                     android:textColor="#FFFFFF"
                     android:textAllCaps="false"
                     style="@style/Widget.MaterialComponents.Button"/>
@@ -445,7 +415,7 @@
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="Klik untuk memproses semua perhitungan rumus berdasarkan data yang telah disimpan"
+                    android:text="Data akan disimpan (offline/online) dan dihitung otomatis saat online"
                     android:textSize="12sp"
                     android:textColor="#666666"
                     android:gravity="center"

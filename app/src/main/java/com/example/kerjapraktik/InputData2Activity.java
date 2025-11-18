@@ -38,14 +38,14 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class InputData2Activity extends AppCompatActivity {
 
     private static final String TAG = "InputData2Activity";
-    private static final String BASE_URL = "http://192.168.1.7/API_Android/public/rembesan/";
+    private static final String BASE_URL = "http://192.168.1.12/API_Android/public/rembesan/";
     private static final String SERVER_INPUT_URL = BASE_URL + "input";
     private static final String CEK_DATA_URL = BASE_URL + "cek-data";
     private static final String GET_PENGUKURAN_URL = BASE_URL + "get_pengukuran";
     private static final String HITUNG_SEMUA_URL = BASE_URL + "Rumus-Rembesan";
 
     private Spinner spinnerPengukuran;
-    private Button btnPilihPengukuran, btnSubmitThomson, btnSubmitSR, btnSubmitBocoran, btnSubmitTmaWaduk, btnHitungSemua;
+    private Button btnPilihPengukuran, btnSimpanDanHitung;
     private EditText inputA1R, inputA1L, inputB1, inputB3, inputB5;
     private EditText inputElv624T1, inputElv615T2, inputPipaP1, inputTmaWaduk;
     private Spinner inputElv624T1Kode, inputElv615T2Kode, inputPipaP1Kode;
@@ -55,7 +55,6 @@ public class InputData2Activity extends AppCompatActivity {
     private final int[] srKodeArray = {1,40,66,68,70,79,81,83,85,92,94,96,98,100,102,104,106};
     private final Map<String,Integer> tanggalToIdMap = new LinkedHashMap<>();
     private int pengukuranId = -1;
-    private String tempIdForCurrentPengukuran = null;
 
     private OfflineDataHelper offlineDb;
     private final AtomicInteger syncCounter = new AtomicInteger(0);
@@ -106,10 +105,6 @@ public class InputData2Activity extends AppCompatActivity {
             if (thomsonTitle != null) {
                 thomsonTitle.setText("Thomson Weir - GALLERY (A1 R, A1 L, B1)");
             }
-
-            if (btnSubmitThomson != null) {
-                btnSubmitThomson.setText("Simpan Thomson - Gallery");
-            }
         } catch (Exception e) {
             Log.e("InputData2Activity", "hideUnnecessaryFieldsHP2 - Error: " + e.getMessage(), e);
         }
@@ -138,7 +133,7 @@ public class InputData2Activity extends AppCompatActivity {
             if (syncTotal > 0) {
                 logInfo("onResume", "Found " + syncTotal + " offline rows to sync");
                 syncPengukuranMaster(() -> {
-                    syncAllOfflineData(() -> {
+                    syncAllOfflineDataAuto(() -> {
                         if (syncTotal > 0 && !isAlreadySynced()) {
                             showElegantToast("Sinkronisasi offline selesai", "success");
                             markAsSynced();
@@ -252,14 +247,345 @@ public class InputData2Activity extends AppCompatActivity {
 
         logInfo("syncAllOfflineDataAuto", "Auto-syncing " + offlineCount + " offline rows");
 
+        // SIMPAN PENGUKURAN_ID SEBELUM SYNC UNTUK JAGA-JAGA
+        final int currentPengukuranId = getLatestPengukuranIdForCalculation();
+        if (currentPengukuranId != -1) {
+            prefs.edit().putInt("pengukuran_id", currentPengukuranId).apply();
+            logInfo("syncAllOfflineDataAuto", "Saved pengukuran_id to prefs: " + currentPengukuranId);
+        }
+
         syncDataSerialAuto("pengukuran", () ->
                 syncDataSerialAuto("thomson", () ->
                         syncDataSerialAuto("sr", () ->
                                 syncDataSerialAuto("bocoran", () -> {
                                     logInfo("syncAllOfflineDataAuto", "All auto sync completed");
+
+                                    // AUTO HITUNG SETELAH SYNC BERHASIL DENGAN RETRY
+                                    if (offlineCount > 0) {
+                                        runOnUiThread(() -> {
+                                            showElegantToast("🔄 Menghitung data setelah sync...", "info");
+
+                                            // COBA HITUNG DENGAN RETRY JIKA GAGAL
+                                            attemptAutoHitungWithRetry(currentPengukuranId, 3, 2000);
+                                        });
+                                    }
+
                                     showElegantToast("✅ " + offlineCount + " data terkirim", "success");
                                     if (onComplete != null) onComplete.run();
                                 }))));
+    }
+
+    private void attemptAutoHitungWithRetry(int pengukuranId, int retryCount, long delayMs) {
+        if (retryCount <= 0) {
+            showElegantToast("❌ Gagal menghitung setelah beberapa percobaan", "error");
+            return;
+        }
+
+        if (!isInternetAvailable()) {
+            showElegantToast("❌ Tidak ada koneksi internet untuk menghitung", "error");
+            return;
+        }
+
+        logInfo("attemptAutoHitungWithRetry", "Attempt hitung, retry left: " + retryCount);
+
+        ProgressDialog pd = new ProgressDialog(this);
+        pd.setMessage("Menghitung data... (Percobaan " + (4 - retryCount) + "/3)");
+        pd.setCancelable(false);
+        pd.show();
+
+        hitungDataOtomatisWithRetry(pengukuranId, pd, retryCount, delayMs);
+    }
+
+    private void hitungDataOtomatisWithRetry(int pengukuranId, ProgressDialog pd, int retryCount, long delayMs) {
+        new Thread(() -> {
+            HttpURLConnection conn = null;
+            try {
+                URL url = new URL(HITUNG_SEMUA_URL);
+                conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("POST");
+                conn.setDoOutput(true);
+                conn.setConnectTimeout(300_000);
+                conn.setReadTimeout(300_000);
+                conn.setRequestProperty("Content-Type", "application/json");
+                conn.setRequestProperty("Accept", "application/json");
+
+                JSONObject json = new JSONObject();
+                json.put("pengukuran_id", pengukuranId);
+
+                OutputStream os = conn.getOutputStream();
+                os.write(json.toString().getBytes("UTF-8"));
+                os.flush();
+                os.close();
+
+                int code = conn.getResponseCode();
+                InputStream is = (code == 200) ? conn.getInputStream() : conn.getErrorStream();
+                BufferedReader br = new BufferedReader(new InputStreamReader(is));
+                StringBuilder sb = new StringBuilder();
+                String line;
+                while ((line = br.readLine()) != null) sb.append(line);
+                br.close();
+
+                JSONObject resp = new JSONObject(sb.toString());
+                runOnUiThread(() -> {
+                    pd.dismiss();
+                    try {
+                        String status = resp.optString("status", "");
+
+                        if ("success".equalsIgnoreCase(status) || "partial_error".equalsIgnoreCase(status)) {
+                            // BERHASIL ATAU PARTIAL SUCCESS - TAMPILKAN HASIL
+                            processHitungResult(resp);
+                        } else {
+                            // GAGAL - COBA LAGI
+                            if (retryCount > 1) {
+                                showElegantToast("⚠️ Coba menghitung lagi...", "warning");
+                                new Handler().postDelayed(() -> {
+                                    attemptAutoHitungWithRetry(pengukuranId, retryCount - 1, delayMs + 1000);
+                                }, delayMs);
+                            } else {
+                                showElegantToast("❌ Gagal menghitung setelah beberapa percobaan", "error");
+                            }
+                        }
+
+                    } catch (Exception e) {
+                        logError("hitungDataOtomatisWithRetry", "Error parsing: " + e.getMessage());
+                        pd.dismiss();
+                    }
+                });
+
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    pd.dismiss();
+                    if (retryCount > 1) {
+                        showElegantToast("⚠️ Coba menghitung lagi...", "warning");
+                        new Handler().postDelayed(() -> {
+                            attemptAutoHitungWithRetry(pengukuranId, retryCount - 1, delayMs + 1000);
+                        }, delayMs);
+                    } else {
+                        showElegantToast("❌ Gagal menghitung: " + e.getMessage(), "error");
+                    }
+                });
+            } finally {
+                if (conn != null) conn.disconnect();
+            }
+        }).start();
+    }
+
+    private void processHitungResult(JSONObject resp) {
+        try {
+            String status = resp.optString("status", "");
+            JSONObject messages = resp.optJSONObject("messages");
+            JSONObject data = resp.optJSONObject("data");
+            String tanggal = resp.optString("tanggal", "-");
+
+            StringBuilder msgBuilder = new StringBuilder();
+            if (messages != null) {
+                Iterator<String> keys = messages.keys();
+                while (keys.hasNext()) {
+                    String key = keys.next();
+                    String value = messages.optString(key, "");
+                    msgBuilder.append("• ").append(key).append(": ").append(value).append("\n");
+                }
+            }
+
+            String lookBurtInfo = "";
+            String statusKeterangan = "aman";
+            if (data != null) {
+                String rembBendungan = data.optString("rembesan_bendungan", "-");
+                String rembPerM = data.optString("rembesan_per_m", "-");
+                String ket = data.optString("keterangan", "-");
+                lookBurtInfo = "\n💧 Analisa Look Burt:\n"
+                        + "  - Rembesan Bendungan: " + rembBendungan + "\n"
+                        + "  - Rembesan per M: " + rembPerM + "\n"
+                        + "  - Keterangan: " + ket;
+
+                if (ket.toLowerCase().contains("bahaya")) {
+                    statusKeterangan = "danger";
+                } else if (ket.toLowerCase().contains("peringatan") || ket.toLowerCase().contains("waspada")) {
+                    statusKeterangan = "warning";
+                } else {
+                    statusKeterangan = "success";
+                }
+            }
+
+            if ("success".equalsIgnoreCase(status)) {
+                showCalculationResultDialog(" Perhitungan Berhasil",
+                        "Semua perhitungan berhasil untuk tanggal " + tanggal + lookBurtInfo,
+                        statusKeterangan, tanggal);
+            } else if ("partial_error".equalsIgnoreCase(status)) {
+                showCalculationResultDialog("⚠️ Perhitungan Sebagian Berhasil",
+                        "Beberapa perhitungan gagal:\n\n" + msgBuilder.toString() + lookBurtInfo,
+                        "warning", tanggal);
+            } else {
+                showElegantToast("❌ Gagal menghitung: " + resp.optString("message", "Terjadi kesalahan"), "error");
+            }
+
+        } catch (Exception e) {
+            showElegantToast("Error parsing hasil: " + e.getMessage(), "error");
+        }
+    }
+
+    // AUTO HITUNG SETELAH DATA OFFLINE BERHASIL DISINKRONKASI
+    private void autoHitungSetelahSync() {
+        if (!isInternetAvailable()) {
+            showElegantToast("❌ Tidak bisa menghitung, tidak ada internet", "error");
+            return;
+        }
+
+        // TUNGGU SEBENTAR UNTUK MEMASTIKAN DATA SUDAH TERSIMPAN DI SERVER
+        new Handler().postDelayed(() -> {
+            int latestPengukuranId = getLatestPengukuranIdForCalculation();
+            if (latestPengukuranId != -1) {
+                logInfo("autoHitungSetelahSync", "Auto hitung untuk pengukuran_id: " + latestPengukuranId);
+
+                ProgressDialog pd = new ProgressDialog(this);
+                pd.setMessage("Menghitung data setelah sync...");
+                pd.setCancelable(false);
+                pd.show();
+
+                hitungDataOtomatis(latestPengukuranId, pd);
+            } else {
+                showElegantToast("❌ Gagal mendapatkan ID pengukuran untuk perhitungan", "error");
+            }
+        }, 2000); // Delay 2 detik untuk memastikan data tersimpan di server
+    }
+
+    private int getLatestPengukuranIdForCalculation() {
+        // Priority 1: Ambil dari SharedPreferences (paling update)
+        int savedId = prefs.getInt("pengukuran_id", -1);
+        if (savedId != -1) {
+            logInfo("getLatestPengukuranId", "Menggunakan pengukuran_id dari prefs: " + savedId);
+            return savedId;
+        }
+
+        // Priority 2: Ambil dari spinner selection
+        String sel = spinnerPengukuran.getSelectedItem() != null ?
+                spinnerPengukuran.getSelectedItem().toString() : null;
+        if (sel != null && tanggalToIdMap.containsKey(sel)) {
+            int id = tanggalToIdMap.get(sel);
+            logInfo("getLatestPengukuranId", "Menggunakan pengukuran_id dari spinner: " + id);
+            return id;
+        }
+
+        // Priority 3: Coba ambil dari data offline terbaru
+        try {
+            List<Map<String, String>> unsyncedData = offlineDb.getUnsyncedData("pengukuran");
+            if (unsyncedData != null && !unsyncedData.isEmpty()) {
+                for (Map<String, String> data : unsyncedData) {
+                    String jsonStr = data.get("json");
+                    if (jsonStr != null) {
+                        JSONObject json = new JSONObject(jsonStr);
+                        if (json.has("pengukuran_id")) {
+                            int id = json.getInt("pengukuran_id");
+                            logInfo("getLatestPengukuranId", "Menggunakan pengukuran_id dari offline: " + id);
+                            return id;
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logError("getLatestPengukuranId", "Error getting ID from offline: " + e.getMessage());
+        }
+
+        logWarn("getLatestPengukuranId", "Tidak ada pengukuran_id yang ditemukan");
+        return -1;
+    }
+
+    private void hitungDataOtomatis(int pengukuranId, ProgressDialog pd) {
+        new Thread(() -> {
+            HttpURLConnection conn = null;
+            try {
+                URL url = new URL(HITUNG_SEMUA_URL);
+                conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("POST");
+                conn.setDoOutput(true);
+                conn.setConnectTimeout(300_000);
+                conn.setReadTimeout(300_000);
+                conn.setRequestProperty("Content-Type", "application/json");
+                conn.setRequestProperty("Accept", "application/json");
+
+                JSONObject json = new JSONObject();
+                json.put("pengukuran_id", pengukuranId);
+
+                OutputStream os = conn.getOutputStream();
+                os.write(json.toString().getBytes("UTF-8"));
+                os.flush();
+                os.close();
+
+                int code = conn.getResponseCode();
+                InputStream is = (code == 200) ? conn.getInputStream() : conn.getErrorStream();
+                BufferedReader br = new BufferedReader(new InputStreamReader(is));
+                StringBuilder sb = new StringBuilder();
+                String line;
+                while ((line = br.readLine()) != null) sb.append(line);
+                br.close();
+
+                JSONObject resp = new JSONObject(sb.toString());
+                runOnUiThread(() -> {
+                    pd.dismiss();
+                    try {
+                        String status = resp.optString("status", "");
+                        JSONObject messages = resp.optJSONObject("messages");
+                        JSONObject data = resp.optJSONObject("data");
+                        String tanggal = resp.optString("tanggal", "-");
+
+                        StringBuilder msgBuilder = new StringBuilder();
+                        if (messages != null) {
+                            Iterator<String> keys = messages.keys();
+                            while (keys.hasNext()) {
+                                String key = keys.next();
+                                String value = messages.optString(key, "");
+                                msgBuilder.append("• ").append(key).append(": ").append(value).append("\n");
+                            }
+                        }
+
+                        String lookBurtInfo = "";
+                        String statusKeterangan = "aman";
+                        if (data != null) {
+                            String rembBendungan = data.optString("rembesan_bendungan", "-");
+                            String rembPerM = data.optString("rembesan_per_m", "-");
+                            String ket = data.optString("keterangan", "-");
+                            lookBurtInfo = "\n💧 Analisa Look Burt:\n"
+                                    + "  - Rembesan Bendungan: " + rembBendungan + "\n"
+                                    + "  - Rembesan per M: " + rembPerM + "\n"
+                                    + "  - Keterangan: " + ket;
+
+                            if (ket.toLowerCase().contains("bahaya")) {
+                                statusKeterangan = "danger";
+                            } else if (ket.toLowerCase().contains("peringatan") || ket.toLowerCase().contains("waspada")) {
+                                statusKeterangan = "warning";
+                            } else {
+                                statusKeterangan = "success";
+                            }
+                        }
+
+                        if ("success".equalsIgnoreCase(status)) {
+                            showCalculationResultDialog(" Perhitungan Berhasil",
+                                    "Semua perhitungan berhasil untuk tanggal " + tanggal + lookBurtInfo,
+                                    statusKeterangan, tanggal);
+                        } else if ("partial_error".equalsIgnoreCase(status)) {
+                            showCalculationResultDialog("⚠️ Perhitungan Sebagian Berhasil",
+                                    "Beberapa perhitungan gagal:\n\n" + msgBuilder.toString() + lookBurtInfo,
+                                    "warning", tanggal);
+                        } else if ("error".equalsIgnoreCase(status)) {
+                            showElegantToast("❌ Gagal menghitung: " + resp.optString("message", "Terjadi kesalahan"), "error");
+                        } else {
+                            showElegantToast("ℹ️ Respon tidak dikenal dari server", "info");
+                        }
+
+                    } catch (Exception e) {
+                        showElegantToast("Error parsing hasil: " + e.getMessage(), "error");
+                    }
+                });
+
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    pd.dismiss();
+                    showElegantToast("Error saat menghitung: " + e.getMessage(), "error");
+                });
+            } finally {
+                if (conn != null) conn.disconnect();
+            }
+        }).start();
     }
 
     private void syncDataSerialAuto(String tableName, Runnable next) {
@@ -449,11 +775,7 @@ public class InputData2Activity extends AppCompatActivity {
     private void bindViews() {
         spinnerPengukuran = findViewById(R.id.spinnerPengukuran);
         btnPilihPengukuran = findViewById(R.id.btnPilihPengukuran);
-        btnSubmitThomson = findViewById(R.id.btnSubmitThomson);
-        btnSubmitSR = findViewById(R.id.btnSubmitSR);
-        btnSubmitBocoran = findViewById(R.id.btnSubmitBocoran);
-        btnSubmitTmaWaduk = findViewById(R.id.btnSubmitTmaWaduk);
-        btnHitungSemua = findViewById(R.id.btnHitungSemua);
+        btnSimpanDanHitung = findViewById(R.id.btnSimpanDanHitung);
 
         inputA1R = findViewById(R.id.inputA1R);
         inputA1L = findViewById(R.id.inputA1L);
@@ -520,33 +842,88 @@ public class InputData2Activity extends AppCompatActivity {
             }
         });
 
-        btnSubmitThomson.setOnClickListener(v -> {
-            Map<String,String> m = buildThomsonDataHP2();
-            if (m != null) simpanAtauOffline("thomson", m);
-        });
+        // TOMBOL GABUNGAN SIMPAN & HITUNG
+        btnSimpanDanHitung.setOnClickListener(v -> handleSimpanDanHitungSemua());
+    }
 
-        if (btnSubmitSR != null) {
-            btnSubmitSR.setOnClickListener(v -> {
-                showElegantToast("Fitur SR tidak tersedia di perangkat ini", "info");
-            });
+    // METHOD UTAMA UNTUK TOMBOL GABUNGAN
+    private void handleSimpanDanHitungSemua() {
+        if (pengukuranId == -1) {
+            showElegantToast("Pilih pengukuran terlebih dahulu.", "warning");
+            return;
         }
 
-        btnSubmitBocoran.setOnClickListener(v -> {
-            Map<String,String> m = buildBocoranData();
-            if (m != null) simpanAtauOffline("bocoran", m);
-        });
+        // Cek dulu apakah ada data yang diinput
+        boolean adaData = !safeText(inputTmaWaduk).isEmpty() ||
+                !safeText(inputA1R).isEmpty() || !safeText(inputA1L).isEmpty() || !safeText(inputB1).isEmpty() ||
+                !safeText(inputElv624T1).isEmpty() || !safeText(inputElv615T2).isEmpty() || !safeText(inputPipaP1).isEmpty();
 
-        btnSubmitTmaWaduk.setOnClickListener(v -> {
-            Map<String,String> m = buildTmaData();
-            if (m != null) simpanAtauOffline("pengukuran", m);
-        });
+        if (!adaData) {
+            showElegantToast("Masukkan data terlebih dahulu", "warning");
+            return;
+        }
 
-        btnHitungSemua.setOnClickListener(v -> handleHitungSemua());
+        // Tampilkan progress dialog
+        ProgressDialog progressDialog = new ProgressDialog(this);
+        progressDialog.setMessage("Menyimpan data...");
+        progressDialog.setCancelable(false);
+        progressDialog.show();
+
+        // Simpan semua data secara berurutan
+        new Thread(() -> {
+            try {
+                // 1. Simpan TMA Waduk jika ada input
+                String tmaWaduk = safeText(inputTmaWaduk);
+                if (!tmaWaduk.isEmpty()) {
+                    Map<String, String> tmaData = buildTmaData();
+                    if (tmaData != null) {
+                        simpanDataSinkron("pengukuran", tmaData);
+                        Thread.sleep(500);
+                    }
+                }
+
+                // 2. Simpan Data Thomson jika ada input
+                if (!safeText(inputA1R).isEmpty() || !safeText(inputA1L).isEmpty() || !safeText(inputB1).isEmpty()) {
+                    Map<String, String> thomsonData = buildThomsonDataHP2();
+                    if (thomsonData != null) {
+                        simpanDataSinkron("thomson", thomsonData);
+                        Thread.sleep(500);
+                    }
+                }
+
+                // 3. Simpan Data Bocoran jika ada input
+                if (!safeText(inputElv624T1).isEmpty() || !safeText(inputElv615T2).isEmpty() || !safeText(inputPipaP1).isEmpty()) {
+                    Map<String, String> bocoranData = buildBocoranData();
+                    if (bocoranData != null) {
+                        simpanDataSinkron("bocoran", bocoranData);
+                        Thread.sleep(500);
+                    }
+                }
+
+                runOnUiThread(() -> {
+                    progressDialog.dismiss();
+
+                    // JIKA ONLINE, LANGSUNG HITUNG
+                    if (isInternetAvailable()) {
+                        showElegantToast("✅ Data tersimpan, menghitung...", "success");
+                        handleHitungSemua();
+                    } else {
+                        // JIKA OFFLINE, SIMPAN SAJA
+                        showElegantToast("📱 Data disimpan offline, akan dihitung otomatis saat online", "warning");
+                    }
+                });
+
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    progressDialog.dismiss();
+                    showElegantToast("Error saat menyimpan data: " + e.getMessage(), "error");
+                });
+            }
+        }).start();
     }
 
     private Map<String,String> buildThomsonDataHP2() {
         if (pengukuranId == -1) {
-            showElegantToast("Pilih pengukuran terlebih dahulu.", "warning");
             return null;
         }
         Map<String,String> map = new HashMap<>();
@@ -562,7 +939,6 @@ public class InputData2Activity extends AppCompatActivity {
 
     private Map<String,String> buildBocoranData() {
         if (pengukuranId == -1) {
-            showElegantToast("Pilih pengukuran terlebih dahulu.", "warning");
             return null;
         }
         Map<String,String> map = new HashMap<>();
@@ -580,7 +956,6 @@ public class InputData2Activity extends AppCompatActivity {
     private Map<String,String> buildTmaData() {
         String tma = safeText(inputTmaWaduk);
         if (tma.isEmpty()) {
-            showElegantToast("Masukkan nilai TMA Waduk terlebih dahulu.", "warning");
             return null;
         }
         Map<String,String> map = new HashMap<>();
@@ -590,16 +965,112 @@ public class InputData2Activity extends AppCompatActivity {
         return map;
     }
 
-    private void simpanAtauOffline(String table, Map<String,String> dataMap) {
-        if (!dataMap.containsKey("pengukuran_id") || dataMap.get("pengukuran_id") == null || dataMap.get("pengukuran_id").isEmpty()) {
-            showElegantToast("Pengukuran ID tidak tersedia. Pilih pengukuran terlebih dahulu.", "error");
+    // METHOD UNTUK SIMPAN DATA SINKRON (DIGUNAKAN OLEH TOMBOL GABUNGAN)
+    private void simpanDataSinkron(String table, Map<String,String> dataMap) {
+        if (dataMap == null) return;
+
+        if (!isInternetAvailable()) {
+            saveOffline(table, dataMap);
             return;
         }
 
-        if (isInternetAvailable()) {
-            cekDanSimpanData(table, dataMap);
-        } else {
+        // Untuk pengukuran (TMA), langsung kirim tanpa cek
+        if ("pengukuran".equals(table)) {
+            kirimDataSinkron(table, dataMap);
+            return;
+        }
+
+        // Untuk tabel lain, cek dulu apakah data sudah ada
+        if (!cekDataSudahAda(table, dataMap.get("pengukuran_id"))) {
+            kirimDataSinkron(table, dataMap);
+        }
+    }
+
+    private boolean cekDataSudahAda(String table, String pengukuranId) {
+        if (!isInternetAvailable()) {
+            return false;
+        }
+
+        HttpURLConnection conn = null;
+        try {
+            String urlStr = CEK_DATA_URL + "?pengukuran_id=" + pengukuranId;
+            URL url = new URL(urlStr);
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
+            conn.setConnectTimeout(10_000);
+            conn.setReadTimeout(10_000);
+            conn.setRequestProperty("Accept", "application/json");
+
+            int code = conn.getResponseCode();
+            InputStream is = (code == 200) ? conn.getInputStream() : conn.getErrorStream();
+            BufferedReader br = new BufferedReader(new InputStreamReader(is));
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = br.readLine()) != null) sb.append(line);
+            br.close();
+
+            JSONObject resp = new JSONObject(sb.toString());
+            JSONObject data = resp.has("data") ? resp.getJSONObject("data") : resp;
+
+            switch (table) {
+                case "thomson":
+                    return data.optBoolean("thomson_ada", false) && data.optBoolean("thomson_lengkap", false);
+                case "sr":
+                    return data.optBoolean("sr_ada", false);
+                case "bocoran":
+                    return data.optBoolean("bocoran_ada", false);
+                default:
+                    return false;
+            }
+
+        } catch (Exception e) {
+            logWarn("cekDataSudahAda", "Gagal cek data: " + e.getMessage());
+            return false;
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
+    private void kirimDataSinkron(String table, Map<String,String> dataMap) {
+        if (!isInternetAvailable()) {
             saveOffline(table, dataMap);
+            return;
+        }
+
+        HttpURLConnection conn = null;
+        try {
+            URL url = new URL(SERVER_INPUT_URL);
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("POST");
+            conn.setDoOutput(true);
+            conn.setConnectTimeout(15_000);
+            conn.setReadTimeout(15_000);
+            conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+            conn.setRequestProperty("Accept", "application/json");
+
+            JSONObject json = new JSONObject();
+            for (Map.Entry<String, String> e : dataMap.entrySet()) {
+                json.put(e.getKey(), e.getValue());
+            }
+
+            OutputStream os = conn.getOutputStream();
+            os.write(json.toString().getBytes("UTF-8"));
+            os.flush();
+            os.close();
+
+            int code = conn.getResponseCode();
+            if (code == 200) {
+                logInfo("kirimDataSinkron", "Data " + table + " berhasil dikirim");
+            } else {
+                // Jika gagal, simpan offline
+                saveOffline(table, dataMap);
+            }
+
+        } catch (Exception e) {
+            logError("kirimDataSinkron", "Gagal kirim data " + table + ": " + e.getMessage());
+            saveOffline(table, dataMap);
+        } finally {
+            if (conn != null) conn.disconnect();
         }
     }
 
@@ -609,288 +1080,9 @@ public class InputData2Activity extends AppCompatActivity {
             String tempId = "local_" + System.currentTimeMillis();
             offlineDb.insertData(table, tempId, json.toString());
             logInfo("saveOffline", "Disimpan offline ke tabel " + table + " tempId=" + tempId);
-            showElegantToast("📱 Tidak ada internet. Data disimpan offline.", "warning");
         } catch (Exception e) {
             logError("saveOffline", "Gagal simpan offline: " + e.getMessage());
-            showElegantToast("❌ Gagal menyimpan offline: " + e.getMessage(), "error");
         }
-    }
-
-    private void cekDanSimpanData(String table, Map<String,String> dataMap) {
-        if ("pengukuran".equals(table)) {
-            kirimDataKeServer(table, dataMap, true);
-            return;
-        }
-
-        new Thread(() -> {
-            HttpURLConnection conn = null;
-            try {
-                String urlStr = CEK_DATA_URL + "?pengukuran_id=" + dataMap.get("pengukuran_id");
-                URL url = new URL(urlStr);
-                conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("GET");
-                conn.setConnectTimeout(10_000);
-                conn.setReadTimeout(10_000);
-                conn.setRequestProperty("Accept", "application/json");
-
-                int code = conn.getResponseCode();
-                InputStream is = (code == 200) ? conn.getInputStream() : conn.getErrorStream();
-                BufferedReader br = new BufferedReader(new InputStreamReader(is));
-                StringBuilder sb = new StringBuilder();
-                String line;
-                while ((line = br.readLine()) != null) sb.append(line);
-                br.close();
-
-                JSONObject resp = new JSONObject(sb.toString());
-                JSONObject data = resp.has("data") ? resp.getJSONObject("data") : resp;
-
-                boolean dataSudahAda = false;
-                boolean dataLengkap = false;
-
-                switch (table) {
-                    case "thomson":
-                        dataSudahAda = data.optBoolean("thomson_ada", false);
-                        dataLengkap = data.optBoolean("thomson_lengkap", false);
-                        break;
-                    case "sr":
-                        dataSudahAda = data.optBoolean("sr_ada", false);
-                        break;
-                    case "bocoran":
-                        dataSudahAda = data.optBoolean("bocoran_ada", false);
-                        break;
-                }
-
-                if (dataSudahAda) {
-                    if ("thomson".equals(table) && !dataLengkap) {
-                        logInfo("cekDanSimpanData", "Thomson exists but incomplete -> will send");
-                        kirimDataKeServer(table, dataMap, false);
-                    } else {
-                        final String msg = "ℹ️ Data " + table + " sudah lengkap untuk pengukuran ini.";
-                        runOnUiThread(() -> showElegantToast(msg, "info"));
-                        logInfo("cekDanSimpanData", msg);
-                    }
-                } else {
-                    kirimDataKeServer(table, dataMap, false);
-                }
-
-            } catch (Exception e) {
-                logWarn("cekDanSimpanData", "Gagal cek data: " + e.getMessage() + " -> Simpan offline sebagai fallback");
-                saveOffline(table, dataMap);
-            } finally {
-                if (conn != null) conn.disconnect();
-            }
-        }).start();
-    }
-
-    private void kirimDataKeServer(String table, Map<String,String> dataMap, boolean isPengukuran) {
-        new Thread(() -> {
-            HttpURLConnection conn = null;
-            try {
-                URL url = new URL(SERVER_INPUT_URL);
-                conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("POST");
-                conn.setDoOutput(true);
-                conn.setConnectTimeout(15_000);
-                conn.setReadTimeout(15_000);
-                conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-                conn.setRequestProperty("Accept", "application/json");
-
-                JSONObject json = new JSONObject();
-                for (Map.Entry<String,String> e : dataMap.entrySet()) {
-                    json.put(e.getKey(), e.getValue());
-                }
-
-                OutputStream os = conn.getOutputStream();
-                os.write(json.toString().getBytes("UTF-8"));
-                os.flush();
-                os.close();
-
-                int code = conn.getResponseCode();
-                InputStream is = (code == 200) ? conn.getInputStream() : conn.getErrorStream();
-                BufferedReader br = new BufferedReader(new InputStreamReader(is));
-                StringBuilder sb = new StringBuilder();
-                String line;
-                while ((line = br.readLine()) != null) sb.append(line);
-                br.close();
-
-                JSONObject resp = new JSONObject(sb.toString());
-                String status = resp.optString("status", "");
-                String message = resp.optString("message", "");
-
-                if ("success".equalsIgnoreCase(status)) {
-                    logInfo("kirimDataKeServer", "Server accepted data for table=" + table + " message=" + message);
-
-                    if (isPengukuran && resp.has("pengukuran_id")) {
-                        int newId = resp.optInt("pengukuran_id", -1);
-                        if (newId != -1) {
-                            try {
-                                OfflineDataHelper db = new OfflineDataHelper(this);
-                                db.insertPengukuranMaster(newId, dataMap.getOrDefault("tanggal", ""));
-                                logInfo("kirimDataKeServer", "Inserted pengukuran_master id=" + newId);
-                                syncPengukuranMaster(null);
-                            } catch (Exception e) {
-                                logWarn("kirimDataKeServer", "Gagal insert pengukuran_master: " + e.getMessage());
-                            }
-                        }
-                    }
-
-                    final String successMessage;
-                    if ("thomson".equals(table)) {
-                        successMessage = "✅ Data Thomson Weir berhasil disimpan";
-                    } else if ("bocoran".equals(table)) {
-                        successMessage = "✅ Data Bocoran berhasil disimpan";
-                    } else if ("pengukuran".equals(table)) {
-                        successMessage = "✅ Data TMA Waduk berhasil disimpan";
-                    } else {
-                        successMessage = "✅ Data berhasil disimpan";
-                    }
-
-                    runOnUiThread(() -> showElegantToast(successMessage, "success"));
-
-                } else if ("idle".equalsIgnoreCase(status)) {
-                    logInfo("kirimDataKeServer", "Server returned IDLE: " + message);
-                    runOnUiThread(() -> showElegantToast("ℹ️ Server idle: " + message, "info"));
-                } else {
-                    logError("kirimDataKeServer", "Server returned error: " + message + " (code=" + code + ")");
-                    runOnUiThread(() -> showElegantToast("❌ Server error: " + message, "error"));
-                }
-
-            } catch (Exception e) {
-                logError("kirimDataKeServer", "Exception while sending: " + e.getMessage());
-                try {
-                    final String offlineMessage;
-                    if ("thomson".equals(table)) {
-                        offlineMessage = "📱 Data Thomson Weir (Gallery) disimpan offline";
-                    } else if ("bocoran".equals(table)) {
-                        offlineMessage = "📱 Data Bocoran disimpan offline";
-                    } else if ("pengukuran".equals(table)) {
-                        offlineMessage = "📱 Data TMA Waduk disimpan offline";
-                    } else {
-                        offlineMessage = "📱 Data disimpan offline";
-                    }
-
-                    JSONObject json = new JSONObject(dataMap);
-                    String tempId = "local_" + System.currentTimeMillis();
-                    offlineDb.insertData(table, tempId, json.toString());
-                    logInfo("kirimDataKeServer", "Disimpan offline ke tabel " + table + " tempId=" + tempId);
-                    runOnUiThread(() -> showElegantToast(offlineMessage, "warning"));
-
-                } catch (Exception ex) {
-                    logError("kirimDataKeServer", "Also failed to save offline: " + ex.getMessage());
-                    runOnUiThread(() -> showElegantToast("❌ Gagal kirim & gagal simpan offline: " + ex.getMessage(), "error"));
-                }
-            } finally {
-                if (conn != null) conn.disconnect();
-            }
-        }).start();
-    }
-
-    private void syncAllOfflineData(@Nullable Runnable onComplete) {
-        logInfo("syncAllOfflineData", "Starting offline sync sequence...");
-        syncDataSerial("pengukuran", () ->
-                syncDataSerial("thomson", () ->
-                        syncDataSerial("sr", () ->
-                                syncDataSerial("bocoran", () -> {
-                                    logInfo("syncAllOfflineData", "All offline tables processed");
-                                    if (onComplete != null) onComplete.run();
-                                }))));
-    }
-
-    private void syncDataSerial(String tableName, Runnable next) {
-        List<Map<String,String>> list;
-        try {
-            list = offlineDb.getUnsyncedData(tableName);
-        } catch (Exception e) {
-            logError("syncDataSerial", "Failed to read unsynced data for " + tableName + ": " + e.getMessage());
-            if (next != null) next.run();
-            return;
-        }
-
-        if (list == null || list.isEmpty()) {
-            logInfo("syncDataSerial", "No unsynced rows for " + tableName);
-            if (next != null) next.run();
-            return;
-        }
-
-        syncDataItem(tableName, list, 0, next);
-    }
-
-    private void syncDataItem(String tableName, List<Map<String,String>> dataList, int index, Runnable onFinish) {
-        if (index >= dataList.size()) {
-            if (onFinish != null) onFinish.run();
-            return;
-        }
-
-        Map<String,String> item = dataList.get(index);
-        String tempId = item.get("temp_id");
-        String jsonStr = item.get("json");
-
-        if (jsonStr == null || jsonStr.isEmpty()) {
-            logWarn("syncDataItem", "Empty json for tempId=" + tempId + " table=" + tableName + " -> deleting row");
-            offlineDb.deleteByTempId(tableName, tempId);
-            syncDataItem(tableName, dataList, index + 1, onFinish);
-            return;
-        }
-
-        try {
-            JSONObject json = new JSONObject(jsonStr);
-            Map<String,String> dataMap = new HashMap<>();
-            Iterator<String> it = json.keys();
-            while (it.hasNext()) {
-                String k = it.next();
-                dataMap.put(k, json.optString(k, ""));
-            }
-
-            HttpURLConnection conn = null;
-            try {
-                URL url = new URL(SERVER_INPUT_URL);
-                conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("POST");
-                conn.setDoOutput(true);
-                conn.setConnectTimeout(15_000);
-                conn.setReadTimeout(15_000);
-                conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-                conn.setRequestProperty("Accept", "application/json");
-
-                OutputStream os = conn.getOutputStream();
-                os.write(json.toString().getBytes("UTF-8"));
-                os.flush();
-                os.close();
-
-                int code = conn.getResponseCode();
-                InputStream is = (code == 200) ? conn.getInputStream() : conn.getErrorStream();
-                BufferedReader br = new BufferedReader(new InputStreamReader(is));
-                StringBuilder sb = new StringBuilder();
-                String line;
-                while ((line = br.readLine()) != null) sb.append(line);
-                br.close();
-
-                JSONObject resp = new JSONObject(sb.toString());
-                String status = resp.optString("status", "");
-                if ("success".equalsIgnoreCase(status)) {
-                    offlineDb.deleteByTempId(tableName, tempId);
-                    logInfo("syncDataItem", "Synced table=" + tableName + " tempId=" + tempId);
-                    if (showSyncToast) {
-                        int done = syncCounter.incrementAndGet();
-                        logInfo("syncDataItem", "Progress: " + done + " / " + syncTotal);
-                    }
-                } else if ("idle".equalsIgnoreCase(status)) {
-                    offlineDb.deleteByTempId(tableName, tempId);
-                    logInfo("syncDataItem", "Server returned idle for tempId=" + tempId + " -> row deleted");
-                } else {
-                    logWarn("syncDataItem", "Server returned non-success for tempId=" + tempId + ": " + resp.optString("message"));
-                }
-            } catch (Exception e) {
-                logError("syncDataItem", "Failed send for tempId=" + tempId + " err=" + e.getMessage());
-            } finally {
-                if (conn != null) conn.disconnect();
-            }
-        } catch (Exception e) {
-            logError("syncDataItem", "JSON parse failed for tempId=" + tempId + " -> deleting row. err=" + e.getMessage());
-            offlineDb.deleteByTempId(tableName, tempId);
-        }
-
-        runOnUiThread(() -> syncDataItem(tableName, dataList, index + 1, onFinish));
     }
 
     private void syncPengukuranMaster() {

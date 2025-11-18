@@ -8,7 +8,7 @@ import retrofit2.converter.gson.GsonConverterFactory;
 
 public class ApiClient {
     // Ganti sesuai alamat server kamu
-    public static final String BASE_URL = "http://192.168.1.7/API_Android/public/";
+    public static final String BASE_URL = "http://192.168.1.12/API_Android/public/";
 
     private static Retrofit retrofit;
 
